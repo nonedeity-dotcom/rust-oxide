@@ -34,3 +34,30 @@ export function saveSettings() {
   try { globalThis.localStorage?.setItem(KEY, JSON.stringify(S)); } catch { /* ignore */ }
 }
 export function resetSettings() { Object.assign(S, DEFAULTS); saveSettings(); }
+
+// ---- расположение и размер кнопок (отдельный ключ, не трогает DEFAULTS и sanitize) ----
+// LAYOUT[id] = { x, y, s }: центр кнопки в долях экрана (0..1) и множитель размера
+export const LAYOUT_IDS = ['bHit', 'bAim', 'bJump', 'bCrouch', 'bInv', 'bMenu'];
+export const LAYOUT = {};
+const LKEY = 'xust.layout.v1';
+const lclamp = (v, a, b) => Math.min(b, Math.max(a, v));
+export function sanitizeLayout(o) {
+  const r = {};
+  for (const id of LAYOUT_IDS) {
+    const v = o?.[id];
+    if (!v || typeof v !== 'object') continue;
+    const { x, y, s } = v;
+    if (![x, y, s].every((n) => typeof n === 'number' && Number.isFinite(n))) continue;
+    r[id] = { x: lclamp(x, 0.03, 0.97), y: lclamp(y, 0.05, 0.95), s: lclamp(s, 0.5, 2) };
+  }
+  return r;
+}
+export function loadLayout() {
+  try {
+    const l = sanitizeLayout(JSON.parse(globalThis.localStorage?.getItem(LKEY) || '{}'));
+    for (const k of Object.keys(LAYOUT)) delete LAYOUT[k];
+    Object.assign(LAYOUT, l);
+  } catch { /* нет хранилища — стандартная раскладка */ }
+}
+export function saveLayout() { try { globalThis.localStorage?.setItem(LKEY, JSON.stringify(LAYOUT)); } catch { /* ignore */ } }
+export function resetLayout() { for (const k of Object.keys(LAYOUT)) delete LAYOUT[k]; saveLayout(); }
