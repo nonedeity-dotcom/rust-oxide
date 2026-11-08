@@ -1,0 +1,18 @@
+newmtl bear
+Kd 0.28 0.13 0.07
+newmtl muzzle
+Kd 0.50 0.31 0.18
+newmtl deer
+Kd 0.58 0.34 0.15
+newmtl cream
+Kd 0.84 0.69 0.47
+newmtl antler
+Kd 0.70 0.59 0.40
+newmtl boar
+Kd 0.25 0.19 0.14
+newmtl hoof
+Kd 0.10 0.08 0.07
+newmtl tusk
+Kd 0.90 0.80 0.60
+newmtl eye
+Kd 0.015 0.012 0.01
