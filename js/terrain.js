@@ -1,6 +1,7 @@
 // Генерация острова: рельеф, биомы, кольцевая дорога, расстановка объектов.
 // Без three.js — работает и в Node (для тестов).
-import { CONFIG } from './data.js';
+import { CONFIG, ANIMALS } from './data.js';
+import { STATION, toWorld, inStation, stationSolids } from './station.js';
 
 export function mulberry32(a) {
   return function () {
@@ -42,6 +43,7 @@ export function createTerrain(seed = 1337) {
   const edgeR = (ang) => R * (0.9 + 0.3 * (n1.fbm(Math.cos(ang) * 1.3 + 10, Math.sin(ang) * 1.3 + 10, 3) - 0.5));
   const roadR = (ang) => R * 0.6 + 12 * (n2.fbm(Math.cos(ang) * 1.5 + 5, Math.sin(ang) * 1.5 + 5, 2) - 0.5) * 2;
   const roadDist = (x, z) => Math.abs(Math.hypot(x, z) - roadR(Math.atan2(z, x)));
+  const pads = [], stations = []; // ровные площадки под заправки (добавляются после генерации, см. generateWorld)
 
   function heightAt(x, z) {
     const d = Math.hypot(x, z), ang = Math.atan2(z, x);
@@ -52,7 +54,9 @@ export function createTerrain(seed = 1337) {
     // дорога лежит на ровной полосе
     const w = 1 - smoothstep(3, 16, Math.abs(d - roadR(ang)));
     const roadH = 4.5 + (n2.fbm(x * 0.02, z * 0.02, 2) - 0.5) * 1.5;
-    return h + (roadH - h) * w;
+    let r = h + (roadH - h) * w;
+    for (const p of pads) { const pd = Math.hypot(x - p.x, z - p.z); if (pd < p.blend) r = p.h + (r - p.h) * smoothstep(p.flat, p.blend, pd); }
+    return r;
   }
   function biomeAt(x, z) {
     const h = heightAt(x, z);
@@ -63,7 +67,35 @@ export function createTerrain(seed = 1337) {
     a = ((a + Math.PI) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI) - Math.PI;
     return BIOMES[Math.floor(((a + Math.PI) / (2 * Math.PI)) * 3) % 3];
   }
-  return { heightAt, biomeAt, roadDist, roadR, edgeR };
+  const addPad = (x, z, h, flat, blend) => pads.push({ x, z, h, flat, blend });
+  const inStationArea = (x, z, m = 0) => stations.some((st) => inStation(st, x, z, m));
+  return { heightAt, biomeAt, roadDist, roadR, edgeR, addPad, stations, inStation: inStationArea };
+}
+
+// Заправки: по одной примерно в каждой четверти кольцевой дороги, с той стороны, где рельеф ровнее.
+function placeStations(T, rnd, spawn) {
+  const S = STATION, out = [], a0 = rnd() * Math.PI * 2;
+  const road = (a) => { const r = T.roadR(a); return { x: Math.cos(a) * r, z: Math.sin(a) * r }; };
+  const rect = []; // контрольные точки площадки (локальные)
+  for (let i = 0; i <= 4; i++) for (let j = 0; j <= 4; j++) rect.push([S.slab.x0 + (S.slab.x1 - S.slab.x0) * i / 4, S.slab.z0 + (S.slab.z1 - S.slab.z0) * j / 4]);
+  for (let k = 0; k < S.count; k++) {
+    let best = null;
+    for (const da of [0, 0.08, -0.08, 0.16, -0.16, 0.26, -0.26, 0.4, -0.4]) {
+      const a = a0 + k * 2 * Math.PI / S.count + da, p = road(a), p1 = road(a - 0.01), p2 = road(a + 0.01);
+      const tl = Math.hypot(p2.x - p1.x, p2.z - p1.z), tx = (p2.x - p1.x) / tl, tz = (p2.z - p1.z) / tl;
+      for (const side of [1, -1]) {
+        const nx = -tz * side, nz = tx * side; // нормаль к дороге в сторону площадки
+        const st = { x: p.x + nx * S.offset, z: p.z + nz * S.offset, ry: Math.atan2(-nx, -nz), h: T.heightAt(p.x, p.z) };
+        if (Math.hypot(st.x - spawn.x, st.z - spawn.z) < 60) continue;
+        let dev = 0, ok = true;
+        for (const [lx, lz] of rect) { const w = toWorld(st, lx, lz), h = T.heightAt(w.x, w.z); if (h < BEACH_HEIGHT + 0.6) ok = false; dev += Math.abs(h - st.h); }
+        for (let i = 0; i < 8 && ok; i++) { const q = i * Math.PI / 4; if (T.heightAt(st.x + Math.cos(q) * 24, st.z + Math.sin(q) * 24) < 1.2) ok = false; } // у площадки не должно быть воды
+        if (ok && (!best || dev < best.dev)) best = { st, dev };
+      }
+    }
+    if (best) out.push(best.st);
+  }
+  return out;
 }
 
 export function generateWorld(seed = 1337) {
@@ -88,7 +120,7 @@ export function generateWorld(seed = 1337) {
   spawn.yaw = Math.atan2(spawn.x, spawn.z); // forward = (-sin, -cos) -> смотрим вглубь острова
 
   // --- расстановка объектов с минимальным расстоянием между ними
-  const objects = [], grid = new Map(), K = 4;
+  let objects = []; const grid = new Map(), K = 4;
   const key = (cx, cz) => cx * 100003 + cz;
   const free = (x, z, sp) => {
     const cx = Math.floor(x / K), cz = Math.floor(z / K);
@@ -142,5 +174,30 @@ export function generateWorld(seed = 1337) {
     }
     a += (24 + rnd() * 10) / rr;
   }
-  return { terrain: T, spawn, objects };
+
+  // --- заправки: ровная площадка в рельефе, объекты с площадки убираем, остальным пересчитываем высоту
+  const stations = placeStations(T, rnd, spawn);
+  for (const st of stations) { T.addPad(st.x, st.z, st.h, STATION.flat, STATION.blend); T.stations.push(st); }
+  objects = objects.filter((o) => !T.inStation(o.x, o.z, 3));
+  for (const o of objects) o.y = T.heightAt(o.x, o.z);
+  const crates = [], solids = [];
+  for (const st of stations) {
+    st.crates = STATION.crates.map((c) => { const w = toWorld(st, c.x, c.z); const o = { nt: 'crate', type: 'crate', x: w.x, z: w.z, y: st.h + 0.1, ry: st.ry + c.ry, station: st }; crates.push(o); return o; });
+    for (const [lx, lz, r] of stationSolids()) { const w = toWorld(st, lx, lz); solids.push({ nt: 'solid', x: w.x, z: w.z, y: st.h, cr: r }); }
+  }
+
+  // --- где живут животные: точки по биомам (первые count — начальные, остальные — запас для возрождения)
+  const animalSpawns = {};
+  for (const [type, S] of Object.entries(ANIMALS)) {
+    const pts = [], want = S.count * 4;
+    for (let i = 0; i < 30000 && pts.length < want; i++) {
+      const x = rx(), z = rx();
+      if (!S.habitat.includes(T.biomeAt(x, z)) || T.heightAt(x, z) < 1.6 || T.roadDist(x, z) < 8) continue;
+      if (Math.hypot(x - spawn.x, z - spawn.z) < 70 || T.inStation(x, z, 10) || !free(x, z, 1.2)) continue;
+      if (pts.some((q) => Math.hypot(q.x - x, q.z - z) < 14)) continue;
+      pts.push({ x, z });
+    }
+    animalSpawns[type] = pts;
+  }
+  return { terrain: T, spawn, objects, stations, crates, solids, animalSpawns };
 }
