@@ -22,7 +22,24 @@ jobs:
       - run: grep -q screenOrientation android/app/src/main/AndroidManifest.xml || sed -i 's/<activity /<activity android:screenOrientation="sensorLandscape" /' android/app/src/main/AndroidManifest.xml
       - run: pip install pillow && python tools/make_icons.py
       - run: npx cap sync android
-      - run: cd android && chmod +x gradlew && ./gradlew assembleDebug
+      - name: Build debug APK (с повторами при сбое сети)
+        run: |
+          cd android
+          chmod +x gradlew
+          # меньший дистрибутив Gradle и таймаут скачивания 2 минуты вместо 10 секунд
+          P=gradle/wrapper/gradle-wrapper.properties
+          sed -i 's/-all\.zip/-bin.zip/' "$P"
+          if grep -q '^networkTimeout=' "$P"; then
+            sed -i 's/^networkTimeout=.*/networkTimeout=120000/' "$P"
+          else
+            echo "networkTimeout=120000" >> "$P"
+          fi
+          ok=0
+          for i in 1 2 3; do
+            ./gradlew assembleDebug --no-daemon && ok=1 && break
+            echo "Попытка $i не удалась, повтор через 20 с"; sleep 20
+          done
+          [ "$ok" = 1 ]
       - run: cp android/app/build/outputs/apk/debug/app-debug.apk Xust.apk
       - uses: softprops/action-gh-release@v2
         with:
