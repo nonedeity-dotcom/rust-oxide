@@ -2,9 +2,12 @@
 import * as THREE from 'three';
 import { CONFIG, NODES, BARREL_LOOT, ITEMS, NEED_TOOL, ANIMALS, CRATE, harvestAmount, Furnace, weaponOf, rollCrateLoot, takeCrate, fmtItems } from './data.js';
 import { generateWorld, ROAD_WIDTH } from './terrain.js';
-import { buildGeometries, TREE_MATERIAL, NODE_MATERIAL, makeFurnaceModel, makeAnimalModel, makeCrateModel, makeBagModel, makeStationModel, ANIMAL_MATERIAL, ANIMAL_HURT, ANIMAL_VIS, LEG_PHASE } from './models.js';
+import { buildGeometries, TREE_MATERIAL, ROCK_MATERIAL, NODE_MATERIAL, makeFurnaceModel, makeAnimalModel, makeCrateModel, makeBagModel, makeStationModel, ANIMAL_MATERIAL, ANIMAL_HURT, ANIMAL_VIS, LEG_PHASE } from './models.js';
 import { Animal, pickSpawn } from './fauna.js';
 import { Grass } from './grass.js';
+import { DETAIL, patchGround } from './materials.js';
+import { WeatherSystem } from './weather.js';
+import { WeatherFx } from './weatherfx.js';
 
 const CELL = 8;
 // Пресеты качества: pr — потолок pixelRatio, shadow — размер карты теней (0 — тени выключены), grassR — радиус травы в чанках по 16 м
@@ -33,8 +36,10 @@ export class World {
     this._m = new THREE.Matrix4(); this._qt = new THREE.Quaternion(); this._p = new THREE.Vector3(); this._s = new THREE.Vector3();
     this._up = new THREE.Vector3(0, 1, 0); this._sd = new THREE.Vector3();
     this.shadowSize = 0; this._q = -1;
+    this.wx = new WeatherSystem(); this.cloudOff = new THREE.Vector2(); this.fogBase = null;
     this._buildSky(); this._buildTerrain(); this._buildWater(); this._buildRoad(); this._buildObjects(); this._buildStations(); this._buildAnimals();
     this.grass = new Grass(scene, this.T);
+    this.fx = new WeatherFx(scene);
     this.setTimeOfDay(this.tod);
   }
   groundHeight(x, z) { return this.T.heightAt(x, z); }
@@ -45,6 +50,8 @@ export class World {
     const sh = this.sun.shadow;
     if (Q.shadow && sh.mapSize.x !== Q.shadow) { sh.mapSize.set(Q.shadow, Q.shadow); sh.map?.dispose(); sh.map = null; }
     this.grass.setQuality(Q.grassR, Q.density);
+    this.fx.setQuality(q);
+    DETAIL.xuBump.value = q === 0 ? 0 : 1; DETAIL.xuAmt.value = [0.75, 1, 1.15][q]; // детализация земли, деревьев и камней
   }
 
   // ---------- небо / свет ----------
@@ -56,17 +63,43 @@ export class World {
     const sc2 = this.sun.shadow.camera; sc2.left = sc2.bottom = -SHADOW_EXT; sc2.right = sc2.top = SHADOW_EXT; sc2.near = 40; sc2.far = 380; sc2.updateProjectionMatrix();
     this.sun.shadow.bias = -0.0004; this.sun.shadow.normalBias = 0.3;
     // купол неба: у горизонта цвет тумана (дальние объекты сливаются с небом), выше — глубже; вокруг солнца — свечение
-    this.skyU = { uHor: { value: new THREE.Color() }, uZen: { value: new THREE.Color() }, uSunDir: { value: new THREE.Vector3(0, 1, 0) }, uSunCol: { value: new THREE.Color(0xffc080) }, uDay: { value: 1 } };
+    this.skyU = {
+      uHor: { value: new THREE.Color() }, uZen: { value: new THREE.Color() }, uSunDir: { value: new THREE.Vector3(0, 1, 0) }, uSunCol: { value: new THREE.Color(0xffc080) }, uDay: { value: 1 },
+      uMoonDir: { value: new THREE.Vector3(0, -1, 0) }, uNight: { value: 0 }, uCover: { value: 0 }, uFogH: { value: 0 }, uFlash: { value: 0 },
+      uCloudLit: { value: new THREE.Color(1, 1, 1) }, uCloudDark: { value: new THREE.Color(0.6, 0.62, 0.7) }, uOff: { value: this.cloudOff },
+    };
+    // купол неба: градиент, закат, свечение солнца, луна, процедурные облака (плотность = облачность погоды), туман у горизонта
     this.dome = new THREE.Mesh(new THREE.SphereGeometry(500, 24, 14), new THREE.ShaderMaterial({
       uniforms: this.skyU, side: THREE.BackSide, depthWrite: false, depthTest: false, fog: false,
       vertexShader: 'varying vec3 vDir; void main(){ vDir = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
-      fragmentShader: `varying vec3 vDir; uniform vec3 uHor, uZen, uSunCol, uSunDir; uniform float uDay;
-        void main(){
-          float t = pow(clamp(vDir.y, 0.0, 1.0), 0.5);
-          vec3 c = mix(uHor, uZen, t);
-          float s = max(dot(normalize(vDir), normalize(uSunDir)), 0.0);
-          c += uSunCol * (pow(s, 6.0) * 0.22 + pow(s, 80.0) * 0.5) * uDay;
-          gl_FragColor = vec4(c, 1.0);
+      fragmentShader: `varying vec3 vDir;
+        uniform vec3 uHor, uZen, uSunCol, uSunDir, uMoonDir, uCloudLit, uCloudDark;
+        uniform vec2 uOff;
+        uniform float uDay, uNight, uCover, uFogH, uFlash;
+        float h21(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+        float vn(vec2 p) { vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
+          return mix(mix(h21(i), h21(i + vec2(1.0, 0.0)), f.x), mix(h21(i + vec2(0.0, 1.0)), h21(i + vec2(1.0, 1.0)), f.x), f.y); }
+        void main() {
+          vec3 dir = normalize(vDir);
+          float up = dir.y;
+          vec3 c = mix(uHor, uZen, pow(clamp(up, 0.0, 1.0), 0.5));
+          float s = max(dot(dir, normalize(uSunDir)), 0.0);
+          c += uSunCol * (pow(s, 6.0) * 0.22 + pow(s, 80.0) * 0.5) * uDay * (1.0 - uCover * 0.8);
+          float m = max(dot(dir, normalize(uMoonDir)), 0.0);
+          c += vec3(0.78, 0.82, 0.95) * (smoothstep(0.9983, 0.9988, m) * 0.9 + pow(m, 60.0) * 0.12) * uNight * (1.0 - uCover * 0.92);
+          if (uCover > 0.02 && up > 0.0) {
+            vec2 p = dir.xz / (up + 0.18) * 1.1 + uOff;
+            float dens = (vn(p) * 0.5 + vn(p * 2.1 + 5.2) * 0.25 + vn(p * 4.3 + 1.7) * 0.125) / 0.875 * 0.7 + vn(p * 0.45 + 9.1) * 0.3;
+            float edge = mix(0.78, 0.2, uCover);
+            float cl = smoothstep(edge, edge + 0.22, dens) * smoothstep(0.0, 0.2, up);
+            float thick = smoothstep(edge, edge + 0.45, dens);
+            vec3 col = mix(uCloudLit, uCloudDark, thick * (0.35 + 0.65 * uCover));
+            col += uSunCol * pow(s, 8.0) * 0.35 * (1.0 - thick) * uDay;
+            col += vec3(0.55, 0.62, 0.85) * uFlash * 0.9;
+            c = mix(c, col, cl);
+          }
+          c = mix(c, uHor, (1.0 - smoothstep(0.0, 0.1 + uFogH * 0.45, up)) * (0.35 + uFogH * 0.65));
+          gl_FragColor = linearToOutputTexel(vec4(c, 1.0)); // тот же вывод, что у тумана на земле — без шва на горизонте
         }`,
     }));
     this.dome.renderOrder = -10; this.dome.frustumCulled = false; sc.add(this.dome);
@@ -79,19 +112,44 @@ export class World {
     this.stars.frustumCulled = false; sc.add(this.stars);
     this._white = new THREE.Color(0xffffff); this._night = new THREE.Color(0x070b1c); this._day = new THREE.Color(0x86c5f0); this._dusk = new THREE.Color(0xff8f5a);
     this._zN = new THREE.Color(0x02040c); this._zD = new THREE.Color(0x2c6cc0); this._zS = new THREE.Color(0x5a4a8a);
+    this._gray = new THREE.Color(0x8c97a3); this._grayZ = new THREE.Color(0x56606c); this._mist = new THREE.Color(0xc8ccd0); this._tmp = new THREE.Color();
   }
   setTimeOfDay(tod) {
-    const a = (tod - 0.25) * Math.PI * 2, sh = Math.sin(a); // 0.5 — полдень
+    const a = (tod - 0.25) * Math.PI * 2, sh = Math.sin(a), w = this.wx.s; // 0.5 — полдень
     this._sd.set(Math.cos(a), sh, 0.35).normalize();
-    const day = smooth(-0.12, 0.3, sh), dusk = Math.max(0, 1 - Math.abs(sh) / 0.3);
+    const day = smooth(-0.12, 0.3, sh), dusk = Math.max(0, 1 - Math.abs(sh) / 0.3) * (1 - 0.6 * w.cloud);
+    const gray = clamp(w.dark * 0.9 + w.fog * 0.35, 0, 0.88), light = 0.18 + 0.82 * day; // 0.18 — ночью тучи всё равно светлее чёрного
     const sky = this.scene.background.copy(this._night).lerp(this._day, day).lerp(this._dusk, dusk * 0.55);
+    sky.lerp(this._tmp.copy(this._gray).multiplyScalar(light), gray);                  // непогода: небо сереет
+    sky.lerp(this._tmp.copy(this._mist).multiplyScalar(0.25 + 0.75 * day), w.fog * 0.8); // туман: светлый и молочный
     this.scene.fog.color.copy(sky);
-    this.hemi.intensity = 0.26 + 0.52 * day; this.sun.intensity = 1.55 * day;
-    this.skyU.uHor.value.copy(sky); this.skyU.uZen.value.copy(this._zN).lerp(this._zD, day).lerp(this._zS, dusk * 0.4);
-    this.skyU.uSunDir.value.copy(this._sd); this.skyU.uSunCol.value.setHex(0xffb070).lerp(this._white, day * 0.6); this.skyU.uDay.value = Math.max(0, Math.min(1, sh * 3 + 0.4));
-    this._shadowsOn = day > 0.04;
+    const sunVis = Math.max(0, 1 - 0.8 * smooth(0.3, 1, w.cloud) - 0.12 * w.rain);      // сколько солнца пробивается сквозь облака
+    this.hemi.intensity = (0.26 + 0.52 * day) * (1 + 0.25 * w.cloud) + w.flash * 1.3; this.sun.intensity = 1.55 * day * sunVis;
+    this.skyU.uZen.value.copy(this._zN).lerp(this._zD, day).lerp(this._zS, dusk * 0.4).lerp(this._tmp.copy(this._grayZ).multiplyScalar(light), gray);
+    this.skyU.uHor.value.copy(sky);
+    this.skyU.uSunDir.value.copy(this._sd); this.skyU.uMoonDir.value.copy(this._sd).negate();
+    this.skyU.uSunCol.value.setHex(0xffb070).lerp(this._white, day * 0.6); this.skyU.uDay.value = Math.max(0, Math.min(1, sh * 3 + 0.4));
+    this.skyU.uNight.value = 1 - day; this.skyU.uCover.value = w.cloud; this.skyU.uFogH.value = w.fog; this.skyU.uFlash.value = w.flash;
+    // цвет облаков: белые днём, розовые на закате, тёмно-синие ночью, серые в непогоду
+    const lit = this.skyU.uCloudLit.value.setRGB(0.07, 0.09, 0.16).lerp(this._white, day).lerp(this._tmp.setHex(0xffb89a), dusk * 0.5);
+    lit.lerp(this._tmp.copy(this._gray).multiplyScalar(light * 0.9), w.dark * 0.8);
+    this.skyU.uCloudDark.value.copy(lit).multiplyScalar(0.55 - 0.15 * w.cloud);
+    this._shadowsOn = day > 0.04 && sunVis > 0.15;
     this.sun.color.setHex(0xffb070).lerp(this._white, day);
-    this.stars.material.opacity = 1 - day; this.night = 1 - day;
+    this.stars.material.opacity = (1 - day) * (1 - w.cloud * 0.95); this.night = 1 - day;
+  }
+  // погода в движении: облака плывут, земля мокнет, туман сгущается, осадки и звук
+  _applyWeather(dt, pp) {
+    const w = this.wx.s, fog = this.scene.fog;
+    this.cloudOff.x += dt * (0.004 + 0.02 * w.wind); this.cloudOff.y += dt * (0.0015 + 0.008 * w.wind);
+    // дальность тумана: main.js задаёт базу (ползунок «Дальность»), мы её сужаем; смену базы замечаем по несовпадению
+    if (!this.fogBase || fog.far !== this._fogFar) this.fogBase = { near: fog.near, far: fog.far };
+    fog.near = this.fogBase.near * (1 - 0.92 * w.fog); fog.far = this.fogBase.far * (1 - 0.75 * w.fog - 0.12 * w.rain); this._fogFar = fog.far;
+    const k = 1 - 0.3 * this.wx.wet, kt = 1 - 0.2 * this.wx.wet; // мокрые земля, камни и листва темнее
+    this.terrainMat.color.setScalar(k);
+    this.roadMat.color.copy(this._roadBase).multiplyScalar(k); this.grass.mat?.color?.setScalar(kt);
+    TREE_MATERIAL.color.setScalar(kt); ROCK_MATERIAL.color.setScalar(k);
+    this.fx.update(dt, pp, this.wx, this.T.biomeAt(pp.x, pp.z) === 'winter', clamp(1 - this.night * 0.85, 0.15, 1));
   }
 
   // ---------- рельеф ----------
@@ -100,13 +158,14 @@ export class World {
     geo.rotateX(-Math.PI / 2);
     const pos = geo.attributes.position, col = new Float32Array(pos.count * 3);
     const palette = { forest: [0x4f8a3a, 0x3d7230], desert: [0xdcb56c, 0xcba35a], winter: [0xf0f4f8, 0xdbe5ee], beach: [0xe6d79e, 0xd9c98a], water: [0xa89c72, 0x8a8060] };
-    const c1 = new THREE.Color(), c2 = new THREE.Color(), rock = new THREE.Color(0x7d766a), snowRock = new THREE.Color(0x9aa4ad), biomes = new Array(pos.count);
+    const c1 = new THREE.Color(), c2 = new THREE.Color(), rock = new THREE.Color(0x7d766a), snowRock = new THREE.Color(0x9aa4ad), biomes = new Array(pos.count), aW = new Float32Array(pos.count * 3);
     const vn = (x, z) => { const a = Math.sin(x * 12.9898 + z * 78.233) * 43758.5453; return a - Math.floor(a); };
     const soft = (x, z) => { const xi = Math.floor(x), zi = Math.floor(z), xf = x - xi, zf = z - zi, u = xf * xf * (3 - 2 * xf), v = zf * zf * (3 - 2 * zf); return vn(xi, zi) * (1 - u) * (1 - v) + vn(xi + 1, zi) * u * (1 - v) + vn(xi, zi + 1) * (1 - u) * v + vn(xi + 1, zi + 1) * u * v; };
     for (let i = 0; i < pos.count; i++) {
       const x = pos.getX(i), z = pos.getZ(i), h = T.heightAt(x, z);
       pos.setY(i, h);
       const b = T.biomeAt(x, z); biomes[i] = b; const p = palette[b];
+      aW[i * 3 + (b === 'forest' ? 0 : b === 'winter' ? 2 : 1)] = 1; // вес биома для текстуры земли: лес / песок / снег
       // крупные пятна + мелкая крапчатость
       const patch = soft(x * 0.045, z * 0.045) * 0.6 + soft(x * 0.17, z * 0.17) * 0.4, fine = vn(x, z);
       c1.setHex(p[0]); c2.setHex(p[1]); c1.lerp(c2, Math.min(1, patch * 0.8 + fine * 0.2));
@@ -124,7 +183,9 @@ export class World {
     }
     geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
     geo.computeVertexNormals();
-    const terrain = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ vertexColors: true }));
+    geo.setAttribute('aW', new THREE.BufferAttribute(aW, 3));
+    this.terrainMat = patchGround(new THREE.MeshLambertMaterial({ vertexColors: true }));
+    const terrain = new THREE.Mesh(geo, this.terrainMat);
     terrain.receiveShadow = true; this.scene.add(terrain);
   }
   _buildWater() {
@@ -150,7 +211,11 @@ export class World {
       if (i < N) { const b = i * 2; idx.push(b, b + 1, b + 2, b + 1, b + 3, b + 2); }
     }
     const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); g.setIndex(idx); g.computeVertexNormals();
-    this.scene.add(new THREE.Mesh(g, new THREE.MeshLambertMaterial({ color: 0x8d7b5c, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 })));
+    const rw = new Float32Array(pos.length); for (let i = 1; i < rw.length; i += 3) rw[i] = 1; // дорога — гравий: текстура песка
+    g.setAttribute('aW', new THREE.BufferAttribute(rw, 3));
+    this._roadBase = new THREE.Color(0x8d7b5c);
+    this.roadMat = patchGround(new THREE.MeshLambertMaterial({ color: 0x8d7b5c, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }));
+    this.scene.add(new THREE.Mesh(g, this.roadMat));
   }
 
   // ---------- объекты ----------
@@ -158,9 +223,9 @@ export class World {
     const geos = buildGeometries(), by = {};
     for (const o of this.data.objects) (by[o.type] ||= []).push(o);
     for (const [type, list] of Object.entries(by)) {
-      const mesh = new THREE.InstancedMesh(geos[type], TREE_TYPES.has(type) ? TREE_MATERIAL : NODE_MATERIAL, list.length);
+      const isTree = TREE_TYPES.has(type), tint = new THREE.Color();
+      const mesh = new THREE.InstancedMesh(geos[type], isTree ? TREE_MATERIAL : type === 'barrel' ? NODE_MATERIAL : ROCK_MATERIAL, list.length);
       mesh.frustumCulled = false; mesh.castShadow = true; mesh.receiveShadow = true;
-      const tint = new THREE.Color(), isTree = TREE_TYPES.has(type);
       list.forEach((o, i) => {
         o.mesh = mesh; o.idx = i; this._init(o); this._setMat(o, 1); this._register(o);
         const r = Math.abs(Math.sin(o.x * 12.9898 + o.z * 78.233) * 43758.5453) % 1, t = isTree ? 0.8 + r * 0.32 : 0.9 + r * 0.16; // у каждого дерева свой оттенок
@@ -323,7 +388,8 @@ export class World {
 
   // Возвращает урон, который животные нанесли игроку за кадр. opts.sneak — игрок крадётся (его хуже замечают).
   update(dt, pp, opts) {
-    this.time += dt; this.tod = (this.tod + dt / CONFIG.dayLength) % 1; this.setTimeOfDay(this.tod);
+    this.time += dt; this.tod = (this.tod + dt / CONFIG.dayLength) % 1; this.wx.update(dt); this.setTimeOfDay(this.tod);
+    this._applyWeather(dt, pp);
     // центр теней двигаем шагами в один тексель карты теней — тени не «плывут», когда игрок идёт
     const tgt = this._tgt || (this._tgt = new THREE.Vector3()), d = this._sd, rt = this._rt || (this._rt = new THREE.Vector3()), up2 = this._up2 || (this._up2 = new THREE.Vector3());
     tgt.copy(pp);

@@ -2,12 +2,14 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { TREES } from './trees.js';
+import { patchTrees, patchRocks } from './materials.js';
 import { ANIMAL_MODELS } from './animals.js';
 import { ANIMALS } from './data.js';
 import { STATION } from './station.js';
 
 const V3 = THREE.Vector3, _c = new THREE.Color();
-export const TREE_MATERIAL = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide });
+export const TREE_MATERIAL = patchTrees(new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide })); // кора и листва с текстурой и рельефом
+export const ROCK_MATERIAL = patchRocks(new THREE.MeshLambertMaterial({ vertexColors: true })); // камни и руда: трещины, мох
 export const NODE_MATERIAL = new THREE.MeshLambertMaterial({ vertexColors: true });
 
 function paint(geo, hex) {
@@ -18,11 +20,12 @@ function paint(geo, hex) {
   return geo;
 }
 function treeGeo(d) {
-  const col = new Float32Array(d.tri.length * 9);
-  d.tri.forEach((p, t) => { _c.setHex(d.pal[p]); for (let k = 0; k < 3; k++) col.set([_c.r, _c.g, _c.b], (t * 3 + k) * 3); });
+  const col = new Float32Array(d.tri.length * 9), bark = new Float32Array(d.tri.length * 3);
+  d.tri.forEach((p, t) => { _c.setHex(d.pal[p]); for (let k = 0; k < 3; k++) { col.set([_c.r, _c.g, _c.b], (t * 3 + k) * 3); bark[t * 3 + k] = p === 0 ? 1 : 0; } }); // цвет 0 палитры — ствол
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.Float32BufferAttribute(d.pos, 3));
   g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  g.setAttribute('aBark', new THREE.BufferAttribute(bark, 1));
   g.computeVertexNormals(); // вершины не общие -> плоское low-poly освещение
   return g;
 }

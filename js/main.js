@@ -7,6 +7,7 @@ import { ROAD_WIDTH } from './terrain.js';
 import { S, loadSettings, saveSettings, resetSettings } from './settings.js';
 import * as A from './audio.js';
 import { drawMap } from './map.js';
+import { WEATHER } from './weather.js';
 
 const $ = (id) => document.getElementById(id);
 const canvas = $('c');
@@ -273,6 +274,7 @@ press('bJump', () => { input.jump = true; }, () => { input.jump = false; });
 press('bCrouch', () => { if (panel || dead) return; P.crouch = !P.crouch; $('bCrouch').classList.toggle('on', P.crouch); A.sfx('click'); });
 press('bInv', () => { A.unlock(); A.sfx('click'); openPanel('inv'); });
 press('bMenu', () => { A.unlock(); A.sfx('click'); openPanel('menu'); });
+$('clock').addEventListener('pointerdown', (e) => { e.stopPropagation(); world.wx.cycle(); }); // тап по часам листает погоду (для проверки)
 $('hotbar').addEventListener('pointerdown', (e) => { const b = e.target.closest('[data-i]'); if (b) { sel = +b.dataset.i; renderHotbar(); A.sfx('click'); } });
 addEventListener('keydown', (e) => {
   if (e.repeat) return;
@@ -343,7 +345,7 @@ function frame(now) {
     if (held.userData.light) { held.userData.light.intensity = 1.3 + 0.4 * Math.random() + world.night * 0.6; held.userData.flame.scale.setScalar(0.9 + Math.random() * 0.25); }
   }
   if (curFurnace) { if (Math.hypot(curFurnace.x - P.pos.x, curFurnace.z - P.pos.z) > 6) closePanel(); else { const f = curFurnace.furnace, sg = [f.fuel, f.ore.iron_ore, f.ore.sulfur_ore, f.out.metal, f.out.sulfur, f.active].join(); if (sg !== furSig) { furSig = sg; render(); } } }
-  const hr = world.tod * 24; $('clock').textContent = `${String((hr | 0) % 24).padStart(2, '0')}:${String(((hr % 1) * 60) | 0).padStart(2, '0')} ${world.night > 0.5 ? '🌙' : '☀️'}`;
+  const hr = world.tod * 24; $('clock').textContent = `${String((hr | 0) % 24).padStart(2, '0')}:${String(((hr % 1) * 60) | 0).padStart(2, '0')} ${world.night > 0.5 ? '🌙' : '☀️'} ${WEATHER[world.wx.kind].icon}`;
   renderer.render(scene, camera);
   requestAnimationFrame(frame);
 }
