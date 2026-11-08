@@ -115,7 +115,7 @@ export class World {
     this._gray = new THREE.Color(0x8c97a3); this._grayZ = new THREE.Color(0x56606c); this._mist = new THREE.Color(0xc8ccd0); this._tmp = new THREE.Color();
   }
   setTimeOfDay(tod) {
-    const a = (tod - 0.25) * Math.PI * 2, sh = Math.sin(a), w = this.wx.s; // 0.5 — полдень
+    const a = (tod - 0.25) * Math.PI * 2, sh = Math.sin(a), w = this.wx.s, fl = this.wx.flash; // 0.5 — полдень
     this._sd.set(Math.cos(a), sh, 0.35).normalize();
     const day = smooth(-0.12, 0.3, sh), dusk = Math.max(0, 1 - Math.abs(sh) / 0.3) * (1 - 0.6 * w.cloud);
     const gray = clamp(w.dark * 0.9 + w.fog * 0.35, 0, 0.88), light = 0.18 + 0.82 * day; // 0.18 — ночью тучи всё равно светлее чёрного
@@ -124,12 +124,12 @@ export class World {
     sky.lerp(this._tmp.copy(this._mist).multiplyScalar(0.25 + 0.75 * day), w.fog * 0.8); // туман: светлый и молочный
     this.scene.fog.color.copy(sky);
     const sunVis = Math.max(0, 1 - 0.8 * smooth(0.3, 1, w.cloud) - 0.12 * w.rain);      // сколько солнца пробивается сквозь облака
-    this.hemi.intensity = (0.26 + 0.52 * day) * (1 + 0.25 * w.cloud) + w.flash * 1.3; this.sun.intensity = 1.55 * day * sunVis;
+    this.hemi.intensity = (0.26 + 0.52 * day) * (1 + 0.25 * w.cloud) + fl * 1.3; this.sun.intensity = 1.55 * day * sunVis;
     this.skyU.uZen.value.copy(this._zN).lerp(this._zD, day).lerp(this._zS, dusk * 0.4).lerp(this._tmp.copy(this._grayZ).multiplyScalar(light), gray);
     this.skyU.uHor.value.copy(sky);
     this.skyU.uSunDir.value.copy(this._sd); this.skyU.uMoonDir.value.copy(this._sd).negate();
     this.skyU.uSunCol.value.setHex(0xffb070).lerp(this._white, day * 0.6); this.skyU.uDay.value = Math.max(0, Math.min(1, sh * 3 + 0.4));
-    this.skyU.uNight.value = 1 - day; this.skyU.uCover.value = w.cloud; this.skyU.uFogH.value = w.fog; this.skyU.uFlash.value = w.flash;
+    this.skyU.uNight.value = 1 - day; this.skyU.uCover.value = w.cloud; this.skyU.uFogH.value = w.fog; this.skyU.uFlash.value = fl;
     // цвет облаков: белые днём, розовые на закате, тёмно-синие ночью, серые в непогоду
     const lit = this.skyU.uCloudLit.value.setRGB(0.07, 0.09, 0.16).lerp(this._white, day).lerp(this._tmp.setHex(0xffb89a), dusk * 0.5);
     lit.lerp(this._tmp.copy(this._gray).multiplyScalar(light * 0.9), w.dark * 0.8);
